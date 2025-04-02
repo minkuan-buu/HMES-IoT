@@ -3,7 +3,6 @@
 #include <Preferences.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
 #include <PubSubClient.h> 
 
 #define TDS_PIN 32
@@ -23,6 +22,7 @@ String user_password;
 const char* mqtt_server = "14.225.210.123"; // Hoặc IP Mosquitto
 const int mqtt_port = 1883;
 const char* mqtt_topic = "esp32/status";
+const char* mqtt_subscribe_topic = "esp32/refresh/"; 
 
 WebServer server(80);
 WiFiClient espClient;
@@ -156,6 +156,83 @@ void sendTDSDataToAPI() {
     Serial.println(tdsValue);
 }
 
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("] ");
+  
+  // Convert the payload to a string
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  
+  Serial.println(message);
+  
+  // You can add your logic to handle the received message here
+  if (String(topic) == mqtt_subscribe_topic) {
+    if (message == "turn_on") {
+      Serial.println("Turning on the device...");
+      // Add code to turn on the device or perform some action
+    } else if (message == "turn_off") {
+      Serial.println("Turning off the device...");
+      // Add code to turn off the device or perform some action
+    }
+  }
+}
+
+// void setup() {
+//     Serial.begin(115200);
+//     analogReadResolution(12);
+//     // preferences.begin("wifi", false);
+//     // preferences.remove("ssid");
+//     // preferences.remove("password");
+//     // preferences.end();
+//     preferences.begin("device_info", false); 
+
+//     // Kiểm tra xem deviceId đã tồn tại chưa
+//     if (!preferences.isKey("deviceId")) {
+//         preferences.putString("deviceId", "B61A4675-8D10-4597-8702-42702D16F48F");
+//         Serial.println("✅ Ghi deviceId vào bộ nhớ");
+//     } else {
+//         Serial.println("🔄 deviceId đã tồn tại, không cần ghi lại");
+//     }
+
+//     preferences.end(); // Đóng Preferences để giải phóng bộ nhớ
+
+//     if (!connectToSavedWiFi()) {
+//         WiFi.softAP(ap_ssid, ap_password);
+//         IPAddress apIP(192, 168, 2, 30);
+//         WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+//         Serial.println("ESP32 started as Access Point.");
+//     }
+    
+//     server.on("/scan", HTTP_GET, handleRoot);
+//     server.on("/connect", HTTP_POST, handleConnect);
+
+//     client.setServer(mqtt_server, mqtt_port);
+//     client.setCallback(mqttCallback);
+
+//     preferences.begin("device_info", true);
+//       String deviceId = preferences.getString("deviceId", "Unknown");
+//       while (!client.connected()) {
+//           Serial.println("🔄 Đang kết nối MQTT...");
+//           String clientId = "ESP32_Client" + deviceId;
+//           if (client.connect(clientId.c_str())) {
+//               Serial.println("✅ Đã kết nối MQTT!");
+//               client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
+//           } else {
+//               Serial.print("Lỗi: ");
+//               Serial.println(client.state());
+//               delay(5000);
+//           }
+//       }
+//     preferences.end();
+
+//     // server.on("/clear_wifi", HTTP_GET, handleClearWiFi);
+//     server.begin();
+// }
+
 void setup() {
     Serial.begin(115200);
     analogReadResolution(12);
@@ -163,7 +240,7 @@ void setup() {
     // preferences.remove("ssid");
     // preferences.remove("password");
     // preferences.end();
-    preferences.begin("device_info", false); 
+    preferences.begin("device_info", false);
 
     // Kiểm tra xem deviceId đã tồn tại chưa
     if (!preferences.isKey("deviceId")) {
@@ -173,32 +250,39 @@ void setup() {
         Serial.println("🔄 deviceId đã tồn tại, không cần ghi lại");
     }
 
-    preferences.end(); // Đóng Preferences để giải phóng bộ nhớ
+    preferences.end();
 
-    if (!connectToSavedWiFi()) {
+    if (connectToSavedWiFi() || WiFi.status() == WL_CONNECTED) {
+        Serial.println("✅ Kết nối Wi-Fi đã lưu thành công!");
+        client.setServer(mqtt_server, mqtt_port);
+        client.setCallback(mqttCallback);
+
+        preferences.begin("device_info", true);
+        String deviceId = preferences.getString("deviceId", "Unknown");
+        while (!client.connected()) {
+            Serial.println("🔄 Đang kết nối MQTT...");
+            String clientId = "ESP32_Client" + deviceId;
+            if (client.connect(clientId.c_str())) {
+                Serial.println("✅ Đã kết nối MQTT!");
+                client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
+            } else {
+                Serial.print("Lỗi: ");
+                Serial.println(client.state());
+                delay(5000);
+            }
+        }
+        preferences.end();
+    } else {
+        Serial.println("❌ Không thể kết nối Wi-Fi đã lưu, khởi động AP.");
         WiFi.softAP(ap_ssid, ap_password);
         IPAddress apIP(192, 168, 2, 30);
         WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
         Serial.println("ESP32 started as Access Point.");
+
+        server.on("/scan", HTTP_GET, handleRoot);
+        server.on("/connect", HTTP_POST, handleConnect);
+        server.begin();
     }
-
-    client.setServer(mqtt_server, mqtt_port);
-
-    while (!client.connected()) {
-        Serial.println("🔄 Đang kết nối MQTT...");
-        if (client.connect("ESP32_Client")) {
-            Serial.println("✅ Đã kết nối MQTT!");
-        } else {
-            Serial.print("Lỗi: ");
-            Serial.println(client.state());
-            delay(5000);
-        }
-    }
-
-    server.on("/scan", HTTP_GET, handleRoot);
-    server.on("/connect", HTTP_POST, handleConnect);
-    // server.on("/clear_wifi", HTTP_GET, handleClearWiFi);
-    server.begin();
 }
 
 void sendDeviceStatus(const char* status) {
@@ -217,11 +301,11 @@ void sendDeviceStatus(const char* status) {
 }
 
 void loop() {
-    server.handleClient();
-    // sendTDSDataToAPI();
-    client.loop();
-
-    sendDeviceStatus("online");
-
+    if (WiFi.status() == WL_CONNECTED) {
+        client.loop();
+        sendDeviceStatus("online");
+    } else {
+        server.handleClient();
+    }
     delay(5000);
 }
