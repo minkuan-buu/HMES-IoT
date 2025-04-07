@@ -4,10 +4,17 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <PubSubClient.h> 
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 #define TDS_PIN 32
 #define VREF 3.3
-#define RESOLUTION 4095
+#define RESOLUTION 4095.0
+#define ONE_WIRE_BUS 4  // GPIO4
+
+// Khởi tạo đối tượng OneWire và DallasTemperature
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
 float temperature = 25;
 float adcValue = 0;
@@ -22,7 +29,10 @@ String user_password;
 const char* mqtt_server = "14.225.210.123"; // Hoặc IP Mosquitto
 const int mqtt_port = 1883;
 const char* mqtt_topic = "esp32/status";
-const char* mqtt_subscribe_topic = "esp32/refresh/"; 
+const char* mqtt_subscribe_topic = "esp32/refresh/";
+String mqtt_subscribe_update_refresh_cycle;
+
+unsigned long lastTdsSentTime = 0;
 
 WebServer server(80);
 WiFiClient espClient;
@@ -47,6 +57,24 @@ String scanNetworks() {
     String jsonString;
     serializeJson(doc, jsonString);
     return jsonString;
+}
+
+void calculateTemp() {
+  // Yêu cầu DS18B20 đo nhiệt độ
+  sensors.requestTemperatures();
+
+  // Đọc nhiệt độ (đơn vị: độ C)
+  float temperatureC = sensors.getTempCByIndex(0);
+
+  // Kiểm tra nếu cảm biến trả về giá trị hợp lệ
+  if (temperatureC != DEVICE_DISCONNECTED_C) {
+    Serial.print("Nhiệt độ: ");
+    Serial.print(temperatureC);
+    Serial.println(" °C");
+    temperature = temperatureC;
+  } else {
+    Serial.println("Không đọc được dữ liệu từ DS18B20!");
+  }
 }
 
 void handleConnect() {
@@ -145,16 +173,24 @@ bool connectToSavedWiFi() {
 }
 
 void sendTDSDataToAPI() {
+    calculateTemp();
     adcValue = analogRead(TDS_PIN);
     voltage = (adcValue / RESOLUTION) * VREF;
+
     float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
     float compensationVoltage = voltage / compensationCoefficient;
+
     tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage -
-                255.86 * compensationVoltage * compensationVoltage +
-                857.39 * compensationVoltage) * 0.5;
-    Serial.print("TDS Value: ");
-    Serial.println(tdsValue);
+            255.86 * compensationVoltage * compensationVoltage +
+            857.39 * compensationVoltage) * 0.5;
+
+    Serial.print("Nhiệt độ: "); Serial.println(temperature);
+    Serial.print("ADC: "); Serial.println(adcValue);
+    Serial.print("Voltage: "); Serial.println(voltage, 3);
+    Serial.print("Comp Voltage: "); Serial.println(compensationVoltage, 3);
+    Serial.print("TDS Value: "); Serial.println(tdsValue);
 }
+
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
@@ -178,6 +214,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       Serial.println("Turning off the device...");
       // Add code to turn off the device or perform some action
     }
+  } else if (String(topic) == mqtt_subscribe_update_refresh_cycle) {
+    Serial.println("🕒 Nhận yêu cầu cập nhật refresh cycle: " + message);
+    // Xử lý logic cập nhật thời gian refresh tại đây
   }
 }
 
@@ -236,6 +275,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void setup() {
     Serial.begin(115200);
     analogReadResolution(12);
+    // Khởi động cảm biến DS18B20
+    sensors.begin();
     // preferences.begin("wifi", false);
     // preferences.remove("ssid");
     // preferences.remove("password");
@@ -259,12 +300,14 @@ void setup() {
 
         preferences.begin("device_info", true);
         String deviceId = preferences.getString("deviceId", "Unknown");
+        mqtt_subscribe_update_refresh_cycle = "esp32/" + deviceId + "/refreshCycleHours/";
         while (!client.connected()) {
             Serial.println("🔄 Đang kết nối MQTT...");
             String clientId = "ESP32_Client" + deviceId;
             if (client.connect(clientId.c_str())) {
                 Serial.println("✅ Đã kết nối MQTT!");
                 client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
+                client.subscribe(mqtt_subscribe_update_refresh_cycle.c_str());
             } else {
                 Serial.print("Lỗi: ");
                 Serial.println(client.state());
@@ -304,6 +347,7 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
         client.loop();
         sendDeviceStatus("online");
+        sendTDSDataToAPI();
     } else {
         server.handleClient();
     }
