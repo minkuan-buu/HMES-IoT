@@ -11,11 +11,17 @@
 #define VREF 3.3
 #define RESOLUTION 4095.0
 #define ONE_WIRE_BUS 4  // GPIO4
+#define SCOUNT  30               // số mẫu lấy trung bình
+
+int analogBuffer[SCOUNT];       
+int analogBufferTemp[SCOUNT];
+int analogBufferIndex = 0, copyIndex = 0;
 
 // Khởi tạo đối tượng OneWire và DallasTemperature
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
+float averageVoltage = 0;
 float temperature = 25;
 float adcValue = 0;
 float voltage = 0;
@@ -100,7 +106,7 @@ void handleConnect() {
         Serial.println("\n✅ Kết nối thành công!");
 
         HTTPClient http;
-        http.begin("https://api.hmes.buubuu.id.vn/api/device/active");
+        http.begin("https://api.hmes.site/api/device/active");
         http.addHeader("Content-Type", "application/json");
         http.addHeader("Authorization", "Bearer " + user_token);
         http.addHeader("Cookie", "RefreshToken=" + user_refreshToken + "; DeviceId=" + user_deviceId);
@@ -172,25 +178,111 @@ bool connectToSavedWiFi() {
     return false;
 }
 
+// void sendTDSDataToAPI() {
+//     calculateTemp();
+//     // adcValue = analogRead(TDS_PIN);
+//     // voltage = (adcValue / RESOLUTION) * VREF;
+
+//     // float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+//     // float compensationVoltage = voltage / compensationCoefficient;
+
+//     // tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage -
+//     //         255.86 * compensationVoltage * compensationVoltage +
+//     //         857.39 * compensationVoltage) * 0.25;
+
+//     // Serial.print("Nhiệt độ: "); Serial.println(temperature);
+//     // Serial.print("ADC: "); Serial.println(adcValue);
+//     // Serial.print("Voltage: "); Serial.println(voltage, 3);
+//     // Serial.print("Comp Voltage: "); Serial.println(compensationVoltage, 3);
+//     // Serial.print("TDS Value: "); Serial.println(tdsValue);
+//   static unsigned long analogSampleTimepoint = millis();
+//   if (millis() - analogSampleTimepoint > 40U) {
+//     analogSampleTimepoint = millis();
+//     analogBuffer[analogBufferIndex] = analogRead(TDS_PIN);
+//     analogBufferIndex++;
+//     if (analogBufferIndex == SCOUNT)
+//       analogBufferIndex = 0;
+//   }
+
+//   static unsigned long printTimepoint = millis();
+//   if (millis() - printTimepoint > 800U) {
+//     printTimepoint = millis();
+
+//     for (copyIndex = 0; copyIndex < SCOUNT; copyIndex++)
+//       analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+
+//     int median = getMedianNum(analogBufferTemp, SCOUNT);
+
+//     averageVoltage = (float)median * VREF / RESOLUTION;  // 4095 cho độ phân giải 12-bit
+//     float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+//     float compensationVoltage = averageVoltage / compensationCoefficient;
+
+//     tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
+//                 - 255.86 * compensationVoltage * compensationVoltage
+//                 + 857.39 * compensationVoltage) * 0.5;
+
+//     Serial.print("TDS Value: ");
+//     Serial.print(tdsValue, 0);
+//     Serial.println(" ppm");
+//   }
+// }
+
 void sendTDSDataToAPI() {
-    calculateTemp();
-    adcValue = analogRead(TDS_PIN);
-    voltage = (adcValue / RESOLUTION) * VREF;
+  calculateTemp(); // Hàm này bạn tự định nghĩa để cập nhật biến 'temperature'
 
-    float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
-    float compensationVoltage = voltage / compensationCoefficient;
+  // Đọc ADC SCOUNT lần, lưu vào buffer
+  for (int i = 0; i < SCOUNT; i++) {
+    analogBuffer[i] = analogRead(TDS_PIN);
+    delay(5); // Delay nhỏ để ổn định ADC nếu cần, có thể bỏ nếu không cần
+  }
 
-    tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage -
-            255.86 * compensationVoltage * compensationVoltage +
-            857.39 * compensationVoltage) * 0.5;
+  // Sao chép mảng sang mảng tạm
+  for (int i = 0; i < SCOUNT; i++) {
+    analogBufferTemp[i] = analogBuffer[i];
+  }
 
-    Serial.print("Nhiệt độ: "); Serial.println(temperature);
-    Serial.print("ADC: "); Serial.println(adcValue);
-    Serial.print("Voltage: "); Serial.println(voltage, 3);
-    Serial.print("Comp Voltage: "); Serial.println(compensationVoltage, 3);
-    Serial.print("TDS Value: "); Serial.println(tdsValue);
+  // Lọc trung vị
+  int median = getMedianNum(analogBufferTemp, SCOUNT);
+
+  // Tính toán voltage và TDS
+  averageVoltage = (float)median * VREF / RESOLUTION;
+  float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+  float compensationVoltage = averageVoltage / compensationCoefficient;
+
+  tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
+              - 255.86 * compensationVoltage * compensationVoltage
+              + 857.39 * compensationVoltage) * 0.5;
+
+  // Gửi hoặc in dữ liệu
+  Serial.print("TDS Value: ");
+  Serial.print(tdsValue, 0);
+  Serial.println(" ppm");
 }
 
+int getMedianNum(int bArray[], int iFilterLen) 
+{
+      int bTab[iFilterLen];
+      for (byte i = 0; i<iFilterLen; i++)
+      bTab[i] = bArray[i];
+      int i, j, bTemp;
+      for (j = 0; j < iFilterLen - 1; j++) 
+      {
+      for (i = 0; i < iFilterLen - j - 1; i++) 
+          {
+        if (bTab[i] > bTab[i + 1]) 
+            {
+        bTemp = bTab[i];
+            bTab[i] = bTab[i + 1];
+        bTab[i + 1] = bTemp;
+         }
+      }
+      }
+      if ((iFilterLen & 1) > 0)
+    bTemp = bTab[(iFilterLen - 1) / 2];
+      else
+    bTemp = (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+      return bTemp;
+}
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   Serial.print("Message arrived [");
@@ -275,6 +367,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 void setup() {
     Serial.begin(115200);
     analogReadResolution(12);
+    pinMode(TDS_PIN, INPUT);
     // Khởi động cảm biến DS18B20
     sensors.begin();
     // preferences.begin("wifi", false);
