@@ -7,11 +7,16 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
+#define RELAY_PIN 13
 #define TDS_PIN 32
+#define pH_PIN 34
 #define VREF 3.3
 #define RESOLUTION 4095.0
 #define ONE_WIRE_BUS 4  // GPIO4
 #define SCOUNT  30               // số mẫu lấy trung bình
+#define POWER_PIN 33
+#define SIGNAL_PIN 36
+#define THRESHOLD 1000
 
 int analogBuffer[SCOUNT];       
 int analogBufferTemp[SCOUNT];
@@ -26,6 +31,8 @@ float temperature = 25;
 float adcValue = 0;
 float voltage = 0;
 float tdsValue = 0;
+float pH = 0;
+float waterLevel = 0;
 
 const char* ap_ssid = "HMES-Kit";
 const char* ap_password = "12345678";
@@ -36,9 +43,10 @@ const char* mqtt_server = "14.225.210.123"; // Hoặc IP Mosquitto
 const int mqtt_port = 1883;
 const char* mqtt_topic = "esp32/status";
 const char* mqtt_subscribe_topic = "esp32/refresh/";
-String mqtt_subscribe_update_refresh_cycle;
+const char* mqtt_subscribe_update_refresh_cycle = "esp32/";
 
-unsigned long lastTdsSentTime = 0;
+unsigned long lastSendTime = 0;
+unsigned long interval = 0;  
 
 WebServer server(80);
 WiFiClient espClient;
@@ -83,6 +91,42 @@ void calculateTemp() {
   }
 }
 
+void calculatepH(){
+  int adcValue = analogRead(pH_PIN);
+  float voltage = adcValue * (VREF / RESOLUTION);  // ESP32 có ADC 12-bit
+  pH = 7 + ((2.5 - voltage) / 0.18);    // Công thức tạm, cần hiệu chuẩn
+
+  Serial.print("Điện áp: ");
+  Serial.print(voltage, 2);
+  Serial.print(" V | pH = ");
+  Serial.println(pH, 2);
+}
+
+int readAverage(int pin, int samples) {
+  long total = 0;
+  for (int i = 0; i < samples; i++) {
+    total += analogRead(pin);
+    delay(10); // Tránh đọc quá nhanh
+  }
+  return total / samples;
+}
+
+void getWaterLever(){
+  digitalWrite(POWER_PIN, HIGH);
+  delay(10);
+  int value = analogRead(SIGNAL_PIN);
+  waterLevel = value;
+  digitalWrite(POWER_PIN, LOW);
+
+  if(value > THRESHOLD)
+  {
+    Serial.println("The water is detected");
+    digitalWrite(RELAY_PIN, LOW);
+  } else {
+    digitalWrite(RELAY_PIN, HIGH);
+  }
+}
+
 void handleConnect() {
     user_ssid = server.arg("ssid");
     user_password = server.arg("password");
@@ -106,19 +150,27 @@ void handleConnect() {
         Serial.println("\n✅ Kết nối thành công!");
 
         HTTPClient http;
-        http.begin("https://api.hmes.site/api/device/active");
+        http.begin("https://api.hmes.site/api/device/active/");
         http.addHeader("Content-Type", "application/json");
         http.addHeader("Authorization", "Bearer " + user_token);
         http.addHeader("Cookie", "RefreshToken=" + user_refreshToken + "; DeviceId=" + user_deviceId);
 
-        preferences.begin("device_info", true);
+        preferences.begin("device_info", false);
         String deviceId = preferences.getString("deviceId", "Unknown");
 
         String payload = "\"" + deviceId + "\"";
         int httpResponseCode = http.POST(payload);
+        String apiResponse = "";
 
         if (httpResponseCode > 0) {
+
             newAccessToken = http.header("new-access-token");
+            apiResponse = http.getString();
+            DynamicJsonDocument doc(1024);
+            deserializeJson(doc, apiResponse);
+
+            String token = doc["response"]["token"];
+            preferences.putString("token", token);
             // if (newAccessToken.length() > 0) {
             Serial.println("✔ API Response: " + http.getString());
         } else {
@@ -145,6 +197,55 @@ void handleConnect() {
     }
 }
 
+void getInitData(){
+  HTTPClient http;
+  preferences.begin("device_info", true);
+  String deviceId = preferences.getString("deviceId", "Unknown");
+  String token = preferences.getString("token", "Unknown");
+  String url = "https://api.hmes.site/api/user/me/iot/devices/" + deviceId;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Token", token);
+  http.addHeader("X-DeviceItemId", deviceId);
+  int httpResponseCode = http.GET();
+  String apiResponse = "";
+  if (httpResponseCode > 0) {
+      apiResponse = http.getString();
+      DynamicJsonDocument doc(1024);
+      deserializeJson(doc, apiResponse);
+
+      String lastUpdated = doc["response"]["data"]["lastUpdatedDate"];
+      String tempLastUpdate = lastUpdated.substring(0, lastUpdated.indexOf("+"));
+      int refreshCycleHours = doc["response"]["data"]["refreshCycleHours"];
+      preferences.putString("token", token);
+
+      // Parse datetime
+      int year   = lastUpdated.substring(0, 4).toInt();
+      int month  = lastUpdated.substring(5, 7).toInt();
+      int day    = lastUpdated.substring(8, 10).toInt();
+      int hour   = lastUpdated.substring(11, 13).toInt();
+      int minute = lastUpdated.substring(14, 16).toInt();
+      int second = lastUpdated.substring(17, 19).toInt();
+
+      struct tm timeinfo;
+      timeinfo.tm_year = year - 1900;
+      timeinfo.tm_mon  = month - 1;
+      timeinfo.tm_mday = day;
+      timeinfo.tm_hour = hour;
+      timeinfo.tm_min  = minute;
+      timeinfo.tm_sec  = second;
+
+      time_t epochTime = mktime(&timeinfo);  // seconds
+      lastSendTime = (unsigned long)epochTime * 1000UL; // convert to milliseconds
+
+      interval = (unsigned long)refreshCycleHours * 60UL * 60UL * 1000UL;
+      // if (newAccessToken.length() > 0) {
+      Serial.println("✔ API Response GetInit: " + tempLastUpdate);
+  } else {
+      Serial.println("❌ Lỗi gọi API: " + String(httpResponseCode));
+  }
+  preferences.end();
+}
 
 
 void handleClearWiFi() {
@@ -296,20 +397,48 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   }
   
   Serial.println(message);
-  
+  Serial.println(String(topic));
+  preferences.begin("device_info", true);
+  String deviceId = preferences.getString("deviceId", "Unknown");
+  String expectedTopic = mqtt_subscribe_update_refresh_cycle + deviceId + "/refreshCycleHours";
+  String refreshTopic = mqtt_subscribe_topic + deviceId;
+
   // You can add your logic to handle the received message here
-  if (String(topic) == mqtt_subscribe_topic) {
-    if (message == "turn_on") {
-      Serial.println("Turning on the device...");
-      // Add code to turn on the device or perform some action
-    } else if (message == "turn_off") {
-      Serial.println("Turning off the device...");
-      // Add code to turn off the device or perform some action
-    }
-  } else if (String(topic) == mqtt_subscribe_update_refresh_cycle) {
+  if (String(topic) == refreshTopic) {
+    // if (message == "turn_on") {
+    //   // Serial.println("Turning on the device...");
+    //   // Add code to turn on the device or perform some action
+    // } else if (message == "turn_off") {
+    //   Serial.println("Turning off the device...");
+    //   // Add code to turn off the device or perform some action
+    // }
+    sendTDSDataToAPI();
+    calculatepH();
+    getWaterLever();
+    StaticJsonDocument<200> doc;
+
+    doc["temperature"] = temperature;
+    doc["soluteConcentration"] = tdsValue;
+    doc["ph"] = pH;
+    doc["waterLevel"] = waterLevel;
+
+    String payload;
+    serializeJson(doc, payload);
+
+    String topic = "esp32/refresh/response/" + deviceId;
+    client.publish(topic.c_str(), payload.c_str());
+    Serial.println("✅ Đã refresh dữ liệu");
+
+  } else if (String(topic) == expectedTopic) {
     Serial.println("🕒 Nhận yêu cầu cập nhật refresh cycle: " + message);
+    DynamicJsonDocument doc(1024);
+    deserializeJson(doc, message);
+    int refreshCycleHours = doc["refreshCycleHours"];
+    interval = (unsigned long)refreshCycleHours * 60UL * 60UL * 1000UL;
+    Serial.println("✅ Đã cập nhật refresh cycle: " + refreshCycleHours);
     // Xử lý logic cập nhật thời gian refresh tại đây
   }
+  preferences.end();
 }
 
 // void setup() {
@@ -368,6 +497,11 @@ void setup() {
     Serial.begin(115200);
     analogReadResolution(12);
     pinMode(TDS_PIN, INPUT);
+    analogSetAttenuation(ADC_11db);
+    pinMode(RELAY_PIN, OUTPUT);
+    pinMode(POWER_PIN, OUTPUT);
+    digitalWrite(POWER_PIN, LOW);
+    digitalWrite(RELAY_PIN, HIGH);
     // Khởi động cảm biến DS18B20
     sensors.begin();
     // preferences.begin("wifi", false);
@@ -387,20 +521,20 @@ void setup() {
     preferences.end();
 
     if (connectToSavedWiFi() || WiFi.status() == WL_CONNECTED) {
+        getInitData();
         Serial.println("✅ Kết nối Wi-Fi đã lưu thành công!");
         client.setServer(mqtt_server, mqtt_port);
         client.setCallback(mqttCallback);
 
         preferences.begin("device_info", true);
         String deviceId = preferences.getString("deviceId", "Unknown");
-        mqtt_subscribe_update_refresh_cycle = "esp32/" + deviceId + "/refreshCycleHours/";
         while (!client.connected()) {
             Serial.println("🔄 Đang kết nối MQTT...");
             String clientId = "ESP32_Client" + deviceId;
             if (client.connect(clientId.c_str())) {
                 Serial.println("✅ Đã kết nối MQTT!");
                 client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
-                client.subscribe(mqtt_subscribe_update_refresh_cycle.c_str());
+                client.subscribe((mqtt_subscribe_update_refresh_cycle + deviceId + "/refreshCycleHours").c_str());
             } else {
                 Serial.print("Lỗi: ");
                 Serial.println(client.state());
@@ -436,13 +570,71 @@ void sendDeviceStatus(const char* status) {
     Serial.println("📤 Gửi JSON: " + String(buffer));
 }
 
+void updateLog(){
+  sendTDSDataToAPI();
+  calculatepH();
+  getWaterLever();
+
+  HTTPClient http;
+  preferences.begin("device_info", true);
+  String deviceId = preferences.getString("deviceId", "Unknown");
+  String token = preferences.getString("token", "Unknown");
+  String url = "https://api.hmes.site/api/iot/" + deviceId;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Token", token);
+  http.addHeader("X-DeviceItemId", deviceId);
+  StaticJsonDocument<200> doc;
+
+  doc["temperature"] = temperature;
+  doc["soluteConcentration"] = tdsValue;
+  doc["ph"] = pH;
+  doc["waterLevel"] = waterLevel;
+
+  String payload;
+  serializeJson(doc, payload);
+  int httpResponseCode = http.POST(payload);
+  if (httpResponseCode > 0) {
+      // if (newAccessToken.length() > 0) {
+      Serial.println("✔ API Response GetInit: ");
+  } else {
+      Serial.println("❌ Lỗi gọi API: " + String(httpResponseCode));
+  }
+  preferences.end();
+}
+
 void loop() {
     if (WiFi.status() == WL_CONNECTED) {
         client.loop();
         sendDeviceStatus("online");
-        sendTDSDataToAPI();
+        // getWaterLever();
+
+        unsigned long currentMillis = millis();
+        if (currentMillis - lastSendTime >= interval) {
+            lastSendTime = currentMillis;
+
+            // sendTDSDataToAPI(); // Gửi dữ liệu TDS
+            // calculatepH();
+            // getWaterLever();
+            // // Nếu bạn muốn gửi dữ liệu lên MQTT luôn:
+            // StaticJsonDocument<200> doc;
+            // preferences.begin("device_info", true);
+            // String deviceId = preferences.getString("deviceId", "Unknown");
+            // preferences.end();
+
+            // doc["deviceId"] = deviceId;
+            // doc["tds"] = tdsValue;
+
+            // char buffer[256];
+            // serializeJson(doc, buffer);
+            // client.publish("esp32/tds", buffer); // gửi lên topic tds
+
+            // Serial.println("📤 Gửi dữ liệu TDS định kỳ: " + String(buffer));
+        }
+
     } else {
-        server.handleClient();
+        server.handleClient(); // Khi đang ở chế độ AP
     }
-    delay(5000);
+
+    delay(5000); // Cho nhẹ CPU, không delay 5 tiếng ở đây nhé
 }
