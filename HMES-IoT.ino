@@ -21,17 +21,18 @@
 int analogBuffer[SCOUNT];       
 int analogBufferTemp[SCOUNT];
 int analogBufferIndex = 0, copyIndex = 0;
+bool isRealtime = false;
 
 // Khởi tạo đối tượng OneWire và DallasTemperature
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
 
-float averageVoltage = 0;
-float temperature = 25;
-float adcValue = 0;
-float voltage = 0;
-float tdsValue = 0;
-float pH = 0;
+float averageVoltage = 0.0;
+float temperature = 25.0;
+float adcValue = 0.0;
+float voltage = 0.0;
+float tdsValue = 0.0;
+float pH = 0.0;
 float waterLevel = 0;
 
 const char* ap_ssid = "HMES-Kit";
@@ -43,6 +44,8 @@ const char* mqtt_server = "14.225.210.123"; // Hoặc IP Mosquitto
 const int mqtt_port = 1883;
 const char* mqtt_topic = "esp32/status";
 const char* mqtt_subscribe_topic = "esp32/refresh/";
+const char* mqtt_set_refresh_realtime = "esp32/refresh/realtime";
+const char* mqtt_get_refresh_realtime = "esp32/refresh/realtime/status";
 const char* mqtt_subscribe_update_refresh_cycle = "esp32/";
 
 unsigned long lastSendTime = 0;
@@ -150,7 +153,7 @@ void handleConnect() {
         Serial.println("\n✅ Kết nối thành công!");
 
         HTTPClient http;
-        http.begin("https://api.hmes.site/api/device/active/");
+        http.begin("https://api.hmes.site/api/user/me/devices/active/");
         http.addHeader("Content-Type", "application/json");
         http.addHeader("Authorization", "Bearer " + user_token);
         http.addHeader("Cookie", "RefreshToken=" + user_refreshToken + "; DeviceId=" + user_deviceId);
@@ -160,6 +163,7 @@ void handleConnect() {
 
         String payload = "\"" + deviceId + "\"";
         int httpResponseCode = http.POST(payload);
+
         String apiResponse = "";
 
         if (httpResponseCode > 0) {
@@ -173,17 +177,34 @@ void handleConnect() {
             preferences.putString("token", token);
             // if (newAccessToken.length() > 0) {
             Serial.println("✔ API Response: " + http.getString());
+            getInitData();
+            Serial.println("✅ Kết nối Wi-Fi thành công!");
+            
+            // 🔹 Lưu WiFi vào bộ nhớ ESP
+            preferences.begin("wifi", false);
+            preferences.putString("ssid", user_ssid);
+            preferences.putString("password", user_password);
+            preferences.end();
+            client.setServer(mqtt_server, mqtt_port);
+            client.setCallback(mqttCallback);
+            while (!client.connected()) {
+                Serial.println("🔄 Đang kết nối MQTT...");
+                String clientId = "ESP32_Client" + deviceId;
+                if (client.connect(clientId.c_str())) {
+                    Serial.println("✅ Đã kết nối MQTT!");
+                    client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
+                    client.subscribe((mqtt_subscribe_update_refresh_cycle + deviceId + "/refreshCycleHours").c_str());
+                } else {
+                    Serial.print("Lỗi: ");
+                    Serial.println(client.state());
+                    delay(5000);
+                }
+            }
         } else {
             Serial.println("❌ Lỗi gọi API: " + String(httpResponseCode));
         }
 
         http.end();
-        preferences.end();
-
-        // 🔹 Lưu WiFi vào bộ nhớ ESP
-        preferences.begin("wifi", false);
-        preferences.putString("ssid", user_ssid);
-        preferences.putString("password", user_password);
         preferences.end();
 
         String response = "{\"status\":\"Connected\"}";
@@ -195,6 +216,38 @@ void handleConnect() {
         Serial.println("\n❌ Kết nối thất bại!");
         server.send(400, "text/html", "<h1>Failed to connect. Please try again.</h1>");
     }
+}
+
+void updateLog(float temperature, float soluteConcentration, float ph, float waterLevel) {
+  HTTPClient http;
+  preferences.begin("device_info", true);
+  String deviceId = preferences.getString("deviceId", "Unknown");
+  String token = preferences.getString("token", "Unknown");
+  String url = "https://api.hmes.site/api/iot/" + deviceId;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("X-Token", token);
+  http.addHeader("X-DeviceItemId", deviceId);
+  String payload = "{";
+    payload += "\"temperature\":" + String(temperature, 2) + ",";
+    payload += "\"soluteConcentration\":" + String(soluteConcentration, 2) + ",";
+    payload += "\"ph\":" + String(ph, 2) + ",";
+    payload += "\"waterLevel\":" + String(waterLevel, 2);
+    payload += "}";
+  int httpResponseCode = http.POST(payload);
+  String apiResponse = "";
+  if (httpResponseCode > 0) {
+      apiResponse = http.getString();
+      DynamicJsonDocument doc(1024);
+      deserializeJson(doc, apiResponse);
+
+      String message = doc["response"]["message"];
+
+      Serial.println("✔ API Response GetInit: " + message);
+  } else {
+      Serial.println("❌ Lỗi gọi API: " + String(httpResponseCode));
+  }
+  preferences.end();
 }
 
 void getInitData(){
@@ -262,9 +315,11 @@ bool connectToSavedWiFi() {
     preferences.begin("wifi", true);
     String saved_ssid = preferences.getString("ssid", "");
     String saved_password = preferences.getString("password", "");
-    Serial.println(saved_ssid);
-    Serial.println(saved_password);
     preferences.end();
+
+    Serial.println("🔍 Đang kiểm tra SSID/PASSWORD đã lưu...");
+    Serial.println("SSID: " + saved_ssid);
+    Serial.println("PASSWORD: " + saved_password);
 
     if (saved_ssid.length() > 0 && saved_password.length() > 0) {
         WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
@@ -276,6 +331,8 @@ bool connectToSavedWiFi() {
         }
         return WiFi.status() == WL_CONNECTED;
     }
+
+    // Không có SSID/password đã lưu
     return false;
 }
 
@@ -402,6 +459,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String deviceId = preferences.getString("deviceId", "Unknown");
   String expectedTopic = mqtt_subscribe_update_refresh_cycle + deviceId + "/refreshCycleHours";
   String refreshTopic = mqtt_subscribe_topic + deviceId;
+  String setRefreshRealTime = mqtt_set_refresh_realtime + deviceId;
 
   // You can add your logic to handle the received message here
   if (String(topic) == refreshTopic) {
@@ -427,8 +485,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
     String topic = "esp32/refresh/response/" + deviceId;
     client.publish(topic.c_str(), payload.c_str());
+    updateLog(temperature, tdsValue, pH, waterLevel);
     Serial.println("✅ Đã refresh dữ liệu");
-
   } else if (String(topic) == expectedTopic) {
     Serial.println("🕒 Nhận yêu cầu cập nhật refresh cycle: " + message);
     DynamicJsonDocument doc(1024);
@@ -437,6 +495,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     interval = (unsigned long)refreshCycleHours * 60UL * 60UL * 1000UL;
     Serial.println("✅ Đã cập nhật refresh cycle: " + refreshCycleHours);
     // Xử lý logic cập nhật thời gian refresh tại đây
+  } else if (String(topic) == setRefreshRealTime){
+    Serial.println("🕒 Nhận yêu cầu cập nhật refresh realtime: " + message);
+    if (message == "turn_on") {
+      Serial.println("Turning on the device...");
+      // Add code to turn on the device or perform some action
+    } else if (message == "turn_off") {
+      Serial.println("Turning off the device...");
+      // Add code to turn off the device or perform some action
+    }
   }
   preferences.end();
 }
@@ -493,6 +560,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 //     server.begin();
 // }
 
+bool needReconnect = false;
+
 void setup() {
     Serial.begin(115200);
     analogReadResolution(12);
@@ -502,32 +571,44 @@ void setup() {
     pinMode(POWER_PIN, OUTPUT);
     digitalWrite(POWER_PIN, LOW);
     digitalWrite(RELAY_PIN, HIGH);
-    // Khởi động cảm biến DS18B20
-    sensors.begin();
-    // preferences.begin("wifi", false);
-    // preferences.remove("ssid");
-    // preferences.remove("password");
-    // preferences.end();
-    preferences.begin("device_info", false);
+    sensors.begin(); // Cảm biến nhiệt độ
 
-    // Kiểm tra xem deviceId đã tồn tại chưa
+    // Thiết lập deviceId nếu chưa có
+    preferences.begin("device_info", false);
     if (!preferences.isKey("deviceId")) {
         preferences.putString("deviceId", "B61A4675-8D10-4597-8702-42702D16F48F");
         Serial.println("✅ Ghi deviceId vào bộ nhớ");
     } else {
         Serial.println("🔄 deviceId đã tồn tại, không cần ghi lại");
     }
-
     preferences.end();
 
-    if (connectToSavedWiFi() || WiFi.status() == WL_CONNECTED) {
-        getInitData();
+    // Bắt đầu xử lý WiFi
+    preferences.begin("wifi", true);
+    bool hasSavedSSID = preferences.isKey("ssid") && preferences.getString("ssid", "") != "";
+    preferences.end();
+
+    if (!hasSavedSSID) {
+        Serial.println("⚠️ Không có WiFi đã lưu -> Bật AP Mode");
+        WiFi.softAP(ap_ssid, ap_password);
+        IPAddress apIP(192, 168, 2, 30);
+        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+        Serial.println("🚀 ESP32 đã khởi động ở chế độ Access Point");
+
+        server.on("/scan", HTTP_GET, handleRoot);
+        server.on("/connect", HTTP_POST, handleConnect);
+        server.begin();
+    } else if (connectToSavedWiFi()) {
         Serial.println("✅ Kết nối Wi-Fi đã lưu thành công!");
+        getInitData();
+
         client.setServer(mqtt_server, mqtt_port);
         client.setCallback(mqttCallback);
 
         preferences.begin("device_info", true);
         String deviceId = preferences.getString("deviceId", "Unknown");
+        preferences.end();
+
         while (!client.connected()) {
             Serial.println("🔄 Đang kết nối MQTT...");
             String clientId = "ESP32_Client" + deviceId;
@@ -536,39 +617,69 @@ void setup() {
                 client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
                 client.subscribe((mqtt_subscribe_update_refresh_cycle + deviceId + "/refreshCycleHours").c_str());
             } else {
-                Serial.print("Lỗi: ");
+                Serial.print("Lỗi MQTT: ");
                 Serial.println(client.state());
                 delay(5000);
             }
         }
-        preferences.end();
     } else {
-        Serial.println("❌ Không thể kết nối Wi-Fi đã lưu, khởi động AP.");
-        WiFi.softAP(ap_ssid, ap_password);
-        IPAddress apIP(192, 168, 2, 30);
-        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
-        Serial.println("ESP32 started as Access Point.");
-
-        server.on("/scan", HTTP_GET, handleRoot);
-        server.on("/connect", HTTP_POST, handleConnect);
-        server.begin();
+        Serial.println("❌ Có WiFi đã lưu nhưng không kết nối được -> Gắn cờ thử lại sau");
+        needReconnect = true;
     }
 }
 
+
 void sendDeviceStatus(const char* status) {
-    preferences.begin("device_info", true);
-    String deviceId = preferences.getString("deviceId", "Unknown");
-    preferences.end();
-    StaticJsonDocument<200> doc;
-    doc["deviceId"] = deviceId;
-    doc["status"] = status;
+    // 🔁 Nếu mất kết nối MQTT thì reconnect
+    if (!client.connected()) {
+        Serial.println("⚠️ MQTT ngắt kết nối. Đang thử kết nối lại...");
+        reconnectMQTT(); // Bạn cần có hàm reconnectMQTT()
+    }
 
-    char buffer[256];
-    serializeJson(doc, buffer);
+    if (client.connected()) {
+        preferences.begin("device_info", true);
+        String deviceId = preferences.getString("deviceId", "Unknown");
+        preferences.end();
 
-    client.publish("esp32/status", buffer);
-    Serial.println("📤 Gửi JSON: " + String(buffer));
+        StaticJsonDocument<200> doc;
+        doc["deviceId"] = deviceId;
+        doc["status"] = status;
+
+        char buffer[256];
+        serializeJson(doc, buffer);
+
+        if (client.publish("esp32/status", buffer)) {
+            Serial.println("📤 Gửi JSON thành công: " + String(buffer));
+        } else {
+            Serial.println("❌ Gửi thất bại, topic: esp32/status");
+        }
+    } else {
+        Serial.println("❌ Không thể gửi vì MQTT vẫn chưa kết nối lại.");
+    }
 }
+
+void reconnectMQTT() {
+    while (!client.connected()) {
+        preferences.begin("device_info", true);
+        String deviceId = preferences.getString("deviceId", "Unknown");
+        preferences.end();
+
+        while (!client.connected()) {
+            Serial.println("🔄 Đang kết nối lại MQTT...");
+            String clientId = "ESP32_Client" + deviceId;
+            if (client.connect(clientId.c_str())) {
+                Serial.println("✅ Đã kết nối MQTT!");
+                client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
+                client.subscribe((mqtt_subscribe_update_refresh_cycle + deviceId + "/refreshCycleHours").c_str());
+            } else {
+                Serial.print("Lỗi MQTT: ");
+                Serial.println(client.state());
+                delay(5000);
+            }
+        }
+    }
+}
+
 
 void updateLog(){
   sendTDSDataToAPI();
@@ -603,38 +714,95 @@ void updateLog(){
   preferences.end();
 }
 
+// void loop() {
+//     if (WiFi.status() == WL_CONNECTED) {
+//         client.loop();
+//         sendDeviceStatus("online");
+//         // getWaterLever();
+
+//         unsigned long currentMillis = millis();
+//         if (currentMillis - lastSendTime >= interval) {
+//             lastSendTime = currentMillis;
+
+//             // sendTDSDataToAPI(); // Gửi dữ liệu TDS
+//             // calculatepH();
+//             // getWaterLever();
+//             // // Nếu bạn muốn gửi dữ liệu lên MQTT luôn:
+//             // StaticJsonDocument<200> doc;
+//             // preferences.begin("device_info", true);
+//             // String deviceId = preferences.getString("deviceId", "Unknown");
+//             // preferences.end();
+
+//             // doc["deviceId"] = deviceId;
+//             // doc["tds"] = tdsValue;
+
+//             // char buffer[256];
+//             // serializeJson(doc, buffer);
+//             // client.publish("esp32/tds", buffer); // gửi lên topic tds
+
+//             // Serial.println("📤 Gửi dữ liệu TDS định kỳ: " + String(buffer));
+//         }
+
+//     } else {
+//         server.handleClient(); // Khi đang ở chế độ AP
+//         Serial.println("⚠️ Mất kết nối WiFi! Đang thử kết nối lại...");
+//         if (connectToSavedWiFi()) {
+//           Serial.println("✅ Kết nối lại WiFi thành công!");
+//         } else {
+//           Serial.println("❌ Không thể kết nối lại WiFi!");
+//         }
+//     } 
+
+//     delay(5000); // Cho nhẹ CPU, không delay 5 tiếng ở đây nhé
+// }
+
 void loop() {
     if (WiFi.status() == WL_CONNECTED) {
         client.loop();
         sendDeviceStatus("online");
-        // getWaterLever();
 
         unsigned long currentMillis = millis();
         if (currentMillis - lastSendTime >= interval) {
             lastSendTime = currentMillis;
-
-            // sendTDSDataToAPI(); // Gửi dữ liệu TDS
+            // sendTDSDataToAPI();
             // calculatepH();
             // getWaterLever();
-            // // Nếu bạn muốn gửi dữ liệu lên MQTT luôn:
-            // StaticJsonDocument<200> doc;
-            // preferences.begin("device_info", true);
-            // String deviceId = preferences.getString("deviceId", "Unknown");
-            // preferences.end();
-
-            // doc["deviceId"] = deviceId;
-            // doc["tds"] = tdsValue;
-
-            // char buffer[256];
-            // serializeJson(doc, buffer);
-            // client.publish("esp32/tds", buffer); // gửi lên topic tds
-
-            // Serial.println("📤 Gửi dữ liệu TDS định kỳ: " + String(buffer));
         }
 
+    } else if (needReconnect) {
+        Serial.println("🔁 Thử kết nối lại WiFi đã lưu...");
+        if (connectToSavedWiFi()) {
+            Serial.println("✅ Kết nối lại WiFi thành công!");
+            getInitData();
+
+            client.setServer(mqtt_server, mqtt_port);
+            client.setCallback(mqttCallback);
+
+            preferences.begin("device_info", true);
+            String deviceId = preferences.getString("deviceId", "Unknown");
+
+            while (!client.connected()) {
+                Serial.println("🔄 Đang kết nối MQTT...");
+                String clientId = "ESP32_Client" + deviceId;
+                if (client.connect(clientId.c_str())) {
+                    Serial.println("✅ Đã kết nối MQTT!");
+                    client.subscribe((mqtt_subscribe_topic + deviceId).c_str());
+                    client.subscribe((mqtt_subscribe_update_refresh_cycle + deviceId + "/refreshCycleHours").c_str());
+                    needReconnect = false;  // Reset cờ kết nối lại
+                } else {
+                    Serial.print("Lỗi MQTT: ");
+                    Serial.println(client.state());
+                    delay(5000);
+                }
+            }
+            preferences.end();
+        } else {
+            Serial.println("❌ Vẫn chưa kết nối lại được WiFi...");
+        }
     } else {
         server.handleClient(); // Khi đang ở chế độ AP
+
     }
 
-    delay(5000); // Cho nhẹ CPU, không delay 5 tiếng ở đây nhé
+    delay(5000); // Mỗi lần lặp là sau 5s
 }
