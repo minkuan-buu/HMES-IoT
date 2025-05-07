@@ -16,7 +16,7 @@
 #define SCOUNT  30               // số mẫu lấy trung bình
 #define POWER_PIN 33
 #define SIGNAL_PIN 36
-#define THRESHOLD 1000
+#define THRESHOLD 1580
 
 int analogBuffer[SCOUNT];       
 int analogBufferTemp[SCOUNT];
@@ -120,10 +120,11 @@ void getWaterLever(){
   int value = analogRead(SIGNAL_PIN);
   waterLevel = value;
   digitalWrite(POWER_PIN, LOW);
-
-  if(value > THRESHOLD)
+  Serial.print("Water level value: ");
+  Serial.println(value);
+  if(value < THRESHOLD)
   {
-    Serial.println("The water is detected");
+    Serial.print("The water is detected");
     digitalWrite(RELAY_PIN, LOW);
   } else {
     digitalWrite(RELAY_PIN, HIGH);
@@ -573,6 +574,11 @@ void setup() {
     digitalWrite(RELAY_PIN, HIGH);
     sensors.begin(); // Cảm biến nhiệt độ
 
+    // preferences.begin("wifi", false);
+    // preferences.remove("ssid");
+    // preferences.remove("password");
+    // preferences.end();
+
     // Thiết lập deviceId nếu chưa có
     preferences.begin("device_info", false);
     if (!preferences.isKey("deviceId")) {
@@ -760,13 +766,13 @@ void loop() {
     if (WiFi.status() == WL_CONNECTED) {
         client.loop();
         sendDeviceStatus("online");
+        getWaterLever();
 
         unsigned long currentMillis = millis();
         if (currentMillis - lastSendTime >= interval) {
             lastSendTime = currentMillis;
-            // sendTDSDataToAPI();
+            sendTDSDataToAPI();
             // calculatepH();
-            // getWaterLever();
         }
 
     } else if (needReconnect) {
