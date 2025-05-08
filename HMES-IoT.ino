@@ -22,6 +22,7 @@ int analogBuffer[SCOUNT];
 int analogBufferTemp[SCOUNT];
 int analogBufferIndex = 0, copyIndex = 0;
 bool isRealtime = false;
+bool isAdmin = false;
 
 // Khởi tạo đối tượng OneWire và DallasTemperature
 OneWire oneWire(ONE_WIRE_BUS);
@@ -289,10 +290,14 @@ void getInitData(){
       timeinfo.tm_min  = minute;
       timeinfo.tm_sec  = second;
 
+      // time_t epochTime = mktime(&timeinfo);  // seconds
+      // lastSendTime = (unsigned long)epochTime * 1000UL; // convert to milliseconds
+
+      // interval = (unsigned long)refreshCycleHours * 60UL * 60UL * 1000UL;
       time_t epochTime = mktime(&timeinfo);  // seconds
       lastSendTime = (unsigned long)epochTime * 1000UL; // convert to milliseconds
 
-      interval = (unsigned long)refreshCycleHours * 60UL * 60UL * 1000UL;
+      interval = 5UL * 60UL * 1000UL;  // 5 phút = 5 * 60 giây * 1000 milliseconds
       // if (newAccessToken.length() > 0) {
       Serial.println("✔ API Response GetInit: " + tempLastUpdate);
   } else {
@@ -563,6 +568,82 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 
 bool needReconnect = false;
 
+const char* loginPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ESP32 Login</title>
+</head>
+<body>
+  <h2>Đăng nhập ESP32</h2>
+  <form action="/login" method="POST">
+    <label>Tên đăng nhập:</label><input type="text" name="username"><br><br>
+    <label>Mật khẩu:</label><input type="password" name="password"><br><br>
+    <input type="submit" value="Đăng nhập">
+  </form>
+</body>
+</html>
+)rawliteral";
+
+
+void handleShowLoginPage() {
+  server.send(200, "text/html", loginPage);
+}
+
+void handleLogin() {
+  if (server.hasArg("username") && server.hasArg("password")) {
+    String username = server.arg("username");
+    String password = server.arg("password");
+
+    if (username == "admin" && password == "HMES_IOT@123") {
+      isAdmin = true;
+      String deviceIdForm = R"rawliteral(
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Thiết lập Device ID</title>
+      </head>
+      <body>
+        <h2>Đăng nhập thành công!</h2>
+        <form action="/setDeviceId" method="POST">
+          <label>Nhập Device ID:</label>
+          <input type="text" name="deviceId" required>
+          <input type="submit" value="Lưu">
+        </form>
+      </body>
+      </html>
+      )rawliteral";
+
+      server.send(200, "text/html", deviceIdForm);
+    } else {
+      server.send(200, "text/html; charset=utf-8", "<h2>Sai thông tin đăng nhập.</h2>");
+    }
+  } else {
+    server.send(400, "text/plain; charset=utf-8", "Thiếu thông tin.");
+  }
+}
+
+void handleSetDeviceId() {
+  if (!isAdmin) {
+    server.send(403, "text/html; charset=utf-8", "<h2>Truy cập bị từ chối.</h2>");
+    return;
+  }
+
+  if (server.hasArg("deviceId")) {
+    String deviceId = server.arg("deviceId");
+
+    preferences.begin("device_info", false);
+    preferences.putString("deviceId", deviceId);
+    preferences.end();
+
+    server.send(200, "text/html; charset=utf-8", "<h2>Đã lưu Device ID thành công!</h2>");
+  } else {
+    server.send(400, "text/plain; charset=utf-8", "Thiếu Device ID.");
+  }
+}
+
 void setup() {
     Serial.begin(115200);
     analogReadResolution(12);
@@ -582,9 +663,13 @@ void setup() {
     // Thiết lập deviceId nếu chưa có
     preferences.begin("device_info", false);
     if (!preferences.isKey("deviceId")) {
-        preferences.putString("deviceId", "B61A4675-8D10-4597-8702-42702D16F48F");
-        Serial.println("✅ Ghi deviceId vào bộ nhớ");
+    //     preferences.putString("deviceId", "B61A4675-8D10-4597-8702-42702D16F48F");
+    //     Serial.println("✅ Ghi deviceId vào bộ nhớ");
+        // Serial.println("⚠️ Cảnh báo chưa có deviceId");
     } else {
+        String deviceId = preferences.getString("deviceId", "Unknown");
+        Serial.print("DeviceId hiện tại: ");
+        Serial.println(deviceId);
         Serial.println("🔄 deviceId đã tồn tại, không cần ghi lại");
     }
     preferences.end();
@@ -603,6 +688,9 @@ void setup() {
 
         server.on("/scan", HTTP_GET, handleRoot);
         server.on("/connect", HTTP_POST, handleConnect);
+        server.on("/login", HTTP_GET, handleShowLoginPage);
+        server.on("/login", HTTP_POST, handleLogin);
+        server.on("/setDeviceId", HTTP_POST, handleSetDeviceId);
         server.begin();
     } else if (connectToSavedWiFi()) {
         Serial.println("✅ Kết nối Wi-Fi đã lưu thành công!");
