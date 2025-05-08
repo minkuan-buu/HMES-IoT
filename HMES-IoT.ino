@@ -272,15 +272,20 @@ void getInitData(){
       String lastUpdated = doc["response"]["data"]["lastUpdatedDate"];
       String tempLastUpdate = lastUpdated.substring(0, lastUpdated.indexOf("+"));
       int refreshCycleHours = doc["response"]["data"]["refreshCycleHours"];
+      int dotIndex = tempLastUpdate.indexOf(".");
+      if (dotIndex > 0) {
+        tempLastUpdate = tempLastUpdate.substring(0, dotIndex);  // "2025-05-08T18:22:40"
+      }
+      
       preferences.putString("token", token);
 
       // Parse datetime
-      int year   = lastUpdated.substring(0, 4).toInt();
-      int month  = lastUpdated.substring(5, 7).toInt();
-      int day    = lastUpdated.substring(8, 10).toInt();
-      int hour   = lastUpdated.substring(11, 13).toInt();
-      int minute = lastUpdated.substring(14, 16).toInt();
-      int second = lastUpdated.substring(17, 19).toInt();
+      int year   = tempLastUpdate.substring(0, 4).toInt();
+      int month  = tempLastUpdate.substring(5, 7).toInt();
+      int day    = tempLastUpdate.substring(8, 10).toInt();
+      int hour   = tempLastUpdate.substring(11, 13).toInt();
+      int minute = tempLastUpdate.substring(14, 16).toInt();
+      int second = tempLastUpdate.substring(17, 19).toInt();
 
       struct tm timeinfo;
       timeinfo.tm_year = year - 1900;
@@ -290,14 +295,14 @@ void getInitData(){
       timeinfo.tm_min  = minute;
       timeinfo.tm_sec  = second;
 
-      // time_t epochTime = mktime(&timeinfo);  // seconds
-      // lastSendTime = (unsigned long)epochTime * 1000UL; // convert to milliseconds
-
-      // interval = (unsigned long)refreshCycleHours * 60UL * 60UL * 1000UL;
       time_t epochTime = mktime(&timeinfo);  // seconds
       lastSendTime = (unsigned long)epochTime * 1000UL; // convert to milliseconds
 
-      interval = 5UL * 60UL * 1000UL;  // 5 phút = 5 * 60 giây * 1000 milliseconds
+      interval = (unsigned long)refreshCycleHours * 60UL * 60UL * 1000UL;
+      // time_t epochTime = mktime(&timeinfo);  // seconds
+      // lastSendTime = (unsigned long)epochTime * 1000UL; // convert to milliseconds
+
+      // interval = 5UL * 60UL * 1000UL;  // 5 phút = 5 * 60 giây * 1000 milliseconds
       // if (newAccessToken.length() > 0) {
       Serial.println("✔ API Response GetInit: " + tempLastUpdate);
   } else {
@@ -801,7 +806,8 @@ void updateLog(){
   int httpResponseCode = http.POST(payload);
   if (httpResponseCode > 0) {
       // if (newAccessToken.length() > 0) {
-      Serial.println("✔ API Response GetInit: ");
+      Serial.print("✔ API Response Upload log: ");
+      Serial.println(httpResponseCode);
   } else {
       Serial.println("❌ Lỗi gọi API: " + String(httpResponseCode));
   }
@@ -859,7 +865,8 @@ void loop() {
         unsigned long currentMillis = millis();
         if (currentMillis - lastSendTime >= interval) {
             lastSendTime = currentMillis;
-            sendTDSDataToAPI();
+            updateLog();
+            // sendTDSDataToAPI();
             // calculatepH();
         }
 
