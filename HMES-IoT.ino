@@ -181,7 +181,7 @@ void handleConnect() {
             String token = doc["response"]["token"];
             preferences.putString("token", token);
             // if (newAccessToken.length() > 0) {
-            Serial.println("✔ API Response: " + http.getString());
+            Serial.println("✔ API Response: " + String(httpResponseCode));
             getInitData();
             Serial.println("✅ Kết nối Wi-Fi thành công!");
             
