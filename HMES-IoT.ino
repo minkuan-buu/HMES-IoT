@@ -165,8 +165,13 @@ void handleConnect() {
 
         preferences.begin("device_info", false);
         String deviceId = preferences.getString("deviceId", "Unknown");
+        bool isConnected = preferences.getBool("reconnect", false);
 
-        String payload = "\"" + deviceId + "\"";
+        String payload = "{";
+        payload += "\"deviceItemId\":\"" + deviceId + "\",";
+        payload += "\"isReconnect\":" + String(isConnected ? "true" : "false");
+        payload += "}";
+
         int httpResponseCode = http.POST(payload);
 
         String apiResponse = "";
@@ -190,6 +195,8 @@ void handleConnect() {
             preferences.putString("ssid", user_ssid);
             preferences.putString("password", user_password);
             preferences.end();
+            preferences.putBool("reconnect", false);
+            
             client.setServer(mqtt_server, mqtt_port);
             client.setCallback(mqttCallback);
             while (!client.connected()) {
@@ -338,11 +345,13 @@ void handleClearWiFi() {
 
         Serial.println("✅ Đã xoá WiFi và token, khởi động lại thiết bị...");
         delay(2000);
-        ESP.restart();
     } else {
         Serial.println("❌ Lỗi gọi API: " + String(httpResponseCode));
         String errorResponse = http.getString();
         Serial.println("📨 Nội dung lỗi: " + errorResponse);
+        preferences.begin("device_info", false);
+        preferences.putBool("reconnect", true);
+        preferences.end();
     }
     
     preferences.begin("wifi", false);
@@ -355,6 +364,7 @@ void handleClearWiFi() {
     preferences.end();
 
     http.end();
+    ESP.restart();
 }
 
 bool connectToSavedWiFi() {
@@ -370,10 +380,15 @@ bool connectToSavedWiFi() {
     if (saved_ssid.length() > 0 && saved_password.length() > 0) {
         WiFi.begin(saved_ssid.c_str(), saved_password.c_str());
         int retry = 0;
-        while (WiFi.status() != WL_CONNECTED && retry < 40) {
+        while (WiFi.status() != WL_CONNECTED && retry < 30) {
             delay(500);
             Serial.print(".");
             retry++;
+            if (digitalRead(BUTTON_PIN) == LOW) {
+              Serial.println("Đã nhấn nút BOOT");
+              handleClearWiFi();
+              delay(300);
+            }
         }
         return WiFi.status() == WL_CONNECTED;
     }
