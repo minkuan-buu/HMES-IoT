@@ -336,15 +336,6 @@ void handleClearWiFi() {
         String response = http.getString();
         Serial.println("✅ Phản hồi từ server: " + response);
 
-        preferences.begin("wifi", false);
-        preferences.remove("ssid");
-        preferences.remove("password");
-        preferences.end();
-
-        preferences.begin("device_info", false);
-        preferences.remove("token");
-        preferences.end();
-
         Serial.println("✅ Đã xoá WiFi và token, khởi động lại thiết bị...");
         delay(2000);
         ESP.restart();
@@ -353,6 +344,15 @@ void handleClearWiFi() {
         String errorResponse = http.getString();
         Serial.println("📨 Nội dung lỗi: " + errorResponse);
     }
+    
+    preferences.begin("wifi", false);
+    preferences.remove("ssid");
+    preferences.remove("password");
+    preferences.end();
+
+    preferences.begin("device_info", false);
+    preferences.remove("token");
+    preferences.end();
 
     http.end();
 }
